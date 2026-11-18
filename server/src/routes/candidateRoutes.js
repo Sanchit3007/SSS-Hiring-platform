@@ -45,5 +45,13 @@ router.post(
   candidateController.finalDecisionCandidates
 );
 
+router.post(
+  '/reject-at-stage',
+  validateBody({
+    driveId: { required: true },
+  }),
+  candidateController.rejectAtStage
+);
+
 
 module.exports = router;

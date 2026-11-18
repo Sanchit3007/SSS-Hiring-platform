@@ -23,6 +23,7 @@ import {
   Percent,
   RotateCcw,
   ArrowRight,
+  Ban,
 } from 'lucide-react';
 
 const CandidatesPipeline = () => {
@@ -155,6 +156,7 @@ const CandidatesPipeline = () => {
   const nextStageName = stagesList[nextStageIndex] || 'Group Discussion (GD)';
 
   const [decidingFinal, setDecidingFinal] = useState(false);
+  const [rejectingAtStage, setRejectingAtStage] = useState(false);
 
 
   // Multi-select handlers
@@ -341,6 +343,40 @@ const CandidatesPipeline = () => {
       setError(err.response?.data?.message || `Failed to mark candidate(s) as ${label}`);
     } finally {
       setDecidingFinal(false);
+    }
+  };
+
+  // Reject candidate(s) at their current stage — stops their hiring pipeline
+  const handleRejectAtStage = async (specificIds = null, candidateName = null) => {
+    const ids = specificIds || selectedCandidates;
+
+    if (!ids || ids.length === 0) {
+      setError('Please select candidate(s) to reject at the current stage.');
+      return;
+    }
+
+    const confirmMsg = candidateName
+      ? `Reject candidate "${candidateName}" at the current stage? This will stop their hiring process.`
+      : `Are you sure you want to reject ${ids.length} candidate(s) at their current stage? This will stop their hiring process.`;
+    if (!window.confirm(confirmMsg)) return;
+
+    try {
+      setRejectingAtStage(true);
+      setError('');
+      const res = await axiosClient.post('/candidates/reject-at-stage', {
+        driveId: selectedDriveId,
+        studentIds: ids,
+        reason: `Rejected at ${stageFilter || 'current'} stage`,
+      });
+      if (res.data.success) {
+        setSuccess(res.data.message || `Candidate(s) rejected at current stage`);
+        setSelectedCandidates([]);
+        fetchCandidates();
+      }
+    } catch (err) {
+      setError(err.response?.data?.message || 'Failed to reject candidate(s)');
+    } finally {
+      setRejectingAtStage(false);
     }
   };
 
@@ -622,22 +658,38 @@ const CandidatesPipeline = () => {
                 </button>
               </>
             ) : (
-              <button
-                type="button"
-                className="btn btn-sm btn-success d-flex align-items-center gap-1 shadow-sm text-white"
-                onClick={() => handleAdvanceToStage(null, null, nextStageName)}
-                disabled={advancingGD || candidates.length === 0}
-                title={`Advance candidates to ${nextStageName}`}
-              >
-                <UserCheck size={15} />
-                <span>
-                  {advancingGD
-                    ? `Advancing to ${nextStageName}...`
-                    : selectedCandidates.length > 0
-                    ? `Advance Selected (${selectedCandidates.length}) to ${nextStageName}`
-                    : `Advance Shortlisted to ${nextStageName}`}
-                </span>
-              </button>
+              <>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-success d-flex align-items-center gap-1 shadow-sm text-white"
+                  onClick={() => handleAdvanceToStage(null, null, nextStageName)}
+                  disabled={advancingGD || candidates.length === 0}
+                  title={`Advance candidates to ${nextStageName}`}
+                >
+                  <UserCheck size={15} />
+                  <span>
+                    {advancingGD
+                      ? `Advancing to ${nextStageName}...`
+                      : selectedCandidates.length > 0
+                      ? `Advance Selected (${selectedCandidates.length}) to ${nextStageName}`
+                      : `Advance Shortlisted to ${nextStageName}`}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-danger d-flex align-items-center gap-1 shadow-sm text-white"
+                  onClick={() => handleRejectAtStage()}
+                  disabled={rejectingAtStage || selectedCandidates.length === 0}
+                  title="Reject selected candidates at current stage — stops their hiring process"
+                >
+                  <Ban size={15} />
+                  <span>
+                    {rejectingAtStage
+                      ? 'Rejecting...'
+                      : `Reject at Stage (${selectedCandidates.length})`}
+                  </span>
+                </button>
+              </>
             )}
           </div>
         </div>
@@ -661,7 +713,7 @@ const CandidatesPipeline = () => {
               cand.roundEvaluations?.find((r) => r.stageName === cand.currentStage);
             const isSelected = selectedCandidates.includes(student?._id);
             const isCurrentStageDifferent = stageFilter && stageFilter !== cand.currentStage;
-            const canAdvance = cand.currentStage !== nextStageName;
+            const canAdvance = cand.currentStage !== nextStageName && cand.overallStatus !== 'rejected';
             const showFinalDecision = isFinalStageView || cand.currentStage === finalStageName;
 
             return (
@@ -779,47 +831,68 @@ const CandidatesPipeline = () => {
                     <div className="d-flex flex-wrap justify-content-lg-end gap-2">
                       {showFinalDecision ? (
                         <>
-                          {cand.overallStatus === 'selected' ? (
+                          {cand.overallStatus === 'rejected' ? (
+                            <span className="badge bg-danger-subtle text-danger border border-danger p-2 d-inline-flex align-items-center gap-1">
+                              <Ban size={13} /> Rejected
+                            </span>
+                          ) : cand.overallStatus === 'selected' ? (
                             <span className="badge bg-success-subtle text-success border border-success p-2 d-inline-flex align-items-center gap-1">
                               <CheckCircle size={13} /> Selected
                             </span>
                           ) : (
-                            <button
-                              type="button"
-                              className="btn btn-sm btn-outline-success d-flex align-items-center gap-1"
-                              title={`Mark ${student?.name} as Selected`}
-                              onClick={() => handleFinalDecision('selected', [student?._id], student?.name)}
-                              disabled={decidingFinal}
-                            >
-                              <CheckCircle size={14} /> Select
-                            </button>
+                            <>
+                              <button
+                                type="button"
+                                className="btn btn-sm btn-outline-success d-flex align-items-center gap-1"
+                                title={`Mark ${student?.name} as Selected`}
+                                onClick={() => handleFinalDecision('selected', [student?._id], student?.name)}
+                                disabled={decidingFinal}
+                              >
+                                <CheckCircle size={14} /> Select
+                              </button>
+                              <button
+                                type="button"
+                                className="btn btn-sm btn-outline-danger d-flex align-items-center gap-1"
+                                title={`Mark ${student?.name} as Rejected`}
+                                onClick={() => handleFinalDecision('rejected', [student?._id], student?.name)}
+                                disabled={decidingFinal}
+                              >
+                                <XCircle size={14} /> Reject
+                              </button>
+                            </>
                           )}
+                        </>
+                      ) : canAdvance ? (
+                        <>
+                          <button
+                            type="button"
+                            className="btn btn-sm btn-outline-success d-flex align-items-center gap-1"
+                            title={`Directly advance ${student?.name} to ${nextStageName}`}
+                            onClick={() => handleAdvanceToStage([student?._id], student?.name, nextStageName)}
+                            disabled={advancingGD}
+                          >
+                            <UserCheck size={14} /> Advance to {nextStageName.includes('(') ? nextStageName.split('(')[1].replace(')', '') : nextStageName}
+                          </button>
                           {cand.overallStatus === 'rejected' ? (
                             <span className="badge bg-danger-subtle text-danger border border-danger p-2 d-inline-flex align-items-center gap-1">
-                              <XCircle size={13} /> Rejected
+                              <Ban size={13} /> Rejected
                             </span>
                           ) : (
                             <button
                               type="button"
                               className="btn btn-sm btn-outline-danger d-flex align-items-center gap-1"
-                              title={`Mark ${student?.name} as Rejected`}
-                              onClick={() => handleFinalDecision('rejected', [student?._id], student?.name)}
-                              disabled={decidingFinal}
+                              title={`Reject ${student?.name} at ${cand.currentStage} — stops their hiring process`}
+                              onClick={() => handleRejectAtStage([student?._id], student?.name)}
+                              disabled={rejectingAtStage}
                             >
-                              <XCircle size={14} /> Reject
+                              <Ban size={14} /> Reject
                             </button>
                           )}
                         </>
-                      ) : canAdvance ? (
-                        <button
-                          type="button"
-                          className="btn btn-sm btn-outline-success d-flex align-items-center gap-1"
-                          title={`Directly advance ${student?.name} to ${nextStageName}`}
-                          onClick={() => handleAdvanceToStage([student?._id], student?.name, nextStageName)}
-                          disabled={advancingGD}
-                        >
-                          <UserCheck size={14} /> Advance to {nextStageName.includes('(') ? nextStageName.split('(')[1].replace(')', '') : nextStageName}
-                        </button>
+                      ) : cand.overallStatus === 'rejected' ? (
+                        <span className="badge bg-danger-subtle text-danger border border-danger p-2 d-inline-flex align-items-center gap-1">
+                          <Ban size={13} /> Rejected at {cand.currentStage}
+                        </span>
                       ) : (
                         <span className="badge bg-success-subtle text-success border border-success p-2 d-inline-flex align-items-center gap-1">
                           <CheckCircle size={13} /> In {cand.currentStage}

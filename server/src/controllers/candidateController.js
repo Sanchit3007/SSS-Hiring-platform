@@ -158,6 +158,13 @@ const shortlistCandidate = async (req, res, next) => {
       });
     }
 
+    if (progress.overallStatus === 'rejected') {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot advance a rejected candidate. Their hiring process has been stopped.',
+      });
+    }
+
     const previousStage = progress.currentStage;
     const targetStage = nextStage || (drive.stages && drive.stages[1]) || 'Group Discussion (GD)';
 
@@ -401,6 +408,9 @@ const bulkAdvanceCandidates = async (req, res, next) => {
     let updatedCount = 0;
 
     for (const progress of progresses) {
+      // Skip candidates who are already rejected — their hiring process is stopped
+      if (progress.overallStatus === 'rejected') continue;
+
       const prevStage = progress.currentStage;
       progress.currentStage = nextStageName;
       progress.overallStatus = 'shortlisted';
@@ -511,6 +521,9 @@ const finalDecisionCandidates = async (req, res, next) => {
     let updatedCount = 0;
 
     for (const progress of progresses) {
+      // Skip candidates who are already rejected — their hiring process is stopped
+      if (progress.overallStatus === 'rejected') continue;
+
       const prevStage = progress.currentStage;
       progress.currentStage = finalStage;
       progress.overallStatus = decision;
@@ -558,6 +571,109 @@ const finalDecisionCandidates = async (req, res, next) => {
   }
 };
 
+/**
+ * Reject candidate(s) at their current stage — stops their hiring process
+ * without advancing them to the final round.
+ * POST /api/candidates/reject-at-stage
+ */
+const rejectAtStage = async (req, res, next) => {
+  try {
+    const {
+      driveId,
+      studentIds = [],
+      reason = 'Rejected at current stage',
+    } = req.body;
+
+    if (!Array.isArray(studentIds) || studentIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'At least one candidate ID is required',
+      });
+    }
+
+    const drive = await RecruitmentDrive.findById(driveId);
+    if (!drive) {
+      return res.status(404).json({
+        success: false,
+        message: 'Recruitment drive not found',
+      });
+    }
+
+    if (req.user.role === 'admin' && String(drive.createdBy) !== String(req.user._id)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied: unauthorized drive modification',
+      });
+    }
+
+    const progresses = await CandidateProgress.find({
+      drive: driveId,
+      student: { $in: studentIds },
+    });
+
+    const now = new Date();
+    let updatedCount = 0;
+
+    for (const progress of progresses) {
+      // Already rejected — skip
+      if (progress.overallStatus === 'rejected') continue;
+
+      const currentStage = progress.currentStage;
+
+      // Mark overall status as rejected (candidate stays at current stage)
+      progress.overallStatus = 'rejected';
+      progress.updatedBy = req.user._id;
+
+      // Update the round evaluation for the current stage to "rejected"
+      let stageEval = progress.roundEvaluations.find((r) => r.stageName === currentStage);
+      if (!stageEval) {
+        progress.roundEvaluations.push({
+          stageName: currentStage,
+          status: 'rejected',
+          evaluatedBy: req.user._id,
+          evaluatedAt: now,
+          remarks: reason,
+        });
+      } else {
+        stageEval.status = 'rejected';
+        stageEval.evaluatedBy = req.user._id;
+        stageEval.evaluatedAt = now;
+        if (!stageEval.remarks) stageEval.remarks = reason;
+      }
+
+      // Record stage history
+      progress.stageHistory.push({
+        fromStage: currentStage,
+        toStage: currentStage,
+        status: 'rejected',
+        changedBy: req.user._id,
+        changedAt: now,
+        reason: reason || `Rejected at ${currentStage}`,
+      });
+
+      await progress.save();
+      updatedCount++;
+    }
+
+    await logActivity({
+      actor: req.user,
+      action: 'CANDIDATES_REJECTED_AT_STAGE',
+      resourceType: 'CandidateProgress',
+      resourceId: drive._id,
+      metadata: { count: updatedCount, reason },
+      req,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: `${updatedCount} candidate(s) rejected at their current stage`,
+      updatedCount,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   getCandidatesByDrive,
   shortlistCandidate,
@@ -565,4 +681,5 @@ module.exports = {
   getCandidateProgressDetail,
   bulkAdvanceCandidates,
   finalDecisionCandidates,
+  rejectAtStage,
 };
